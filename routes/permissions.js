@@ -1,61 +1,65 @@
 const express = require('express');
-const db = require('../db');
+const Permission = require('../models/Permission');
+const User = require('../models/User');
 const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Student creates a leave/permission request
-router.post('/', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'student') return res.status(403).json({ error: 'Only students can create requests' });
-  const { reason, start_date, end_date, faculty_id } = req.body;
+router.get('/', authenticateToken, async (req, res) => {
   try {
-    const q = `INSERT INTO permissions (student_id, faculty_id, reason, start_date, end_date)
-      VALUES ($1,$2,$3,$4,$5) RETURNING *`;
-    const vals = [req.user.userId, faculty_id || null, reason || '', start_date || null, end_date || null];
-    const { rows } = await db.query(q, vals);
-    res.json({ ok: true, permission: rows[0] });
+    let filter = {};
+    if (req.user.role === 'student') {
+      filter.student_id = req.user.userId;
+    } else if (req.user.role === 'incharge') {
+      // Branch scoping: Incharges only see requests from their department
+      const studentIds = await User.find({ department: req.user.department, role: 'student' }).distinct('_id');
+      filter.student_id = { $in: studentIds };
+    } else if (req.user.role === 'faculty') {
+      filter.faculty_id = req.user.userId;
+    }
+
+    const items = await Permission.find(filter)
+      .populate('student_id', 'name department')
+      .populate('faculty_id', 'name')
+      .sort({ createdAt: -1 });
+    res.json({ rows: items });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Student gets their own requests
 router.get('/mine', authenticateToken, async (req, res) => {
   try {
-    const { rows } = await db.query('SELECT * FROM permissions WHERE student_id=$1 ORDER BY created_at DESC', [req.user.userId]);
-    res.json({ rows });
+    const items = await Permission.find({ student_id: req.user.userId }).sort({ createdAt: -1 });
+    res.json({ rows: items });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Faculty/Incharge: list pending requests
-router.get('/', authenticateToken, async (req, res) => {
-  if (!['faculty','incharge','admin'].includes(req.user.role)) return res.status(403).json({ error: 'Forbidden' });
+router.post('/', authenticateToken, async (req, res) => {
   try {
-    const { rows } = await db.query("SELECT p.*, u.name as student_name, u.email as student_email FROM permissions p JOIN users u ON u.id = p.student_id WHERE p.status='pending' ORDER BY p.created_at DESC");
-    res.json({ rows });
+    const newItem = new Permission({
+      ...req.body,
+      student_id: req.user.userId
+    });
+    await newItem.save();
+    res.json({ ok: true, data: newItem });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Approve or reject
 router.put('/:id', authenticateToken, async (req, res) => {
-  if (!['faculty','incharge','admin'].includes(req.user.role)) return res.status(403).json({ error: 'Forbidden' });
-  const { id } = req.params;
-  const { status } = req.body;
-  if (!['approved','rejected'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
+  // Allow faculty or incharge to update status
+  if (!['faculty', 'incharge', 'admin'].includes(req.user.role)) return res.status(403).json({ error: 'Permission denied' });
   try {
-    const { rows } = await db.query('UPDATE permissions SET status=$1, updated_at=now() WHERE id=$2 RETURNING *', [status, id]);
-    res.json({ ok: true, permission: rows[0] });
+    const item = await Permission.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true });
+    res.json({ ok: true, data: item });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
 module.exports = router;
+

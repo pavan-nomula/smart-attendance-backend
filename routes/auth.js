@@ -1,125 +1,87 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const db = require('../db');
+const User = require('../models/User');
+const ActivationCode = require('../models/ActivationCode');
 require('dotenv').config();
 
 const router = express.Router();
 
-// Email pattern matching for role detection
-// Student emails: 24pa or 25pa followed by alphanumeric characters (e.g., 24pa1a0250, 25pa2b1234)
-// Updated to be more flexible - just check the prefix before @
 const STUDENT_EMAIL_RE = /^(24pa|25pa)[a-z0-9]+$/i;
-const FACULTY_EMAIL_RE = /^[a-z]+(\.[a-z]+)*@vishnu\.edu\.in$/; // Matches naveen.m@vishnu.edu.in, p.mohith@vishnu.edu.in, etc.
-const INCHARGE_EMAILS = ['admin@vishnu.edu.in']; // Add more incharge emails here
+const FACULTY_EMAIL_RE = /^[a-z]+(\.[a-z]+)*@vishnu\.edu\.in$/;
+const INCHARGE_EMAILS = ['admin@vishnu.edu.in'];
 
-/**
- * Detect role from email address
- */
 function detectRoleFromEmail(email) {
   const lowerEmail = email.toLowerCase().trim();
-  const emailPrefix = lowerEmail.split('@')[0]; // Get part before @
+  const emailPrefix = lowerEmail.split('@')[0];
 
-  // Check if it's an incharge/admin email
   if (INCHARGE_EMAILS.includes(lowerEmail) || lowerEmail.includes('incharge') || lowerEmail.includes('admin')) {
     return 'incharge';
   }
-
-  // Check if it's a student email (24pa/25pa pattern) - check only the prefix
   if (emailPrefix && STUDENT_EMAIL_RE.test(emailPrefix)) {
     return 'student';
   }
-
-  // Check if it's a faculty email (has .m@ or similar pattern)
   if (FACULTY_EMAIL_RE.test(lowerEmail) && emailPrefix && !STUDENT_EMAIL_RE.test(emailPrefix)) {
     return 'faculty';
   }
-
-  // Default to student if pattern matches vishnu.edu.in and starts with 24pa or 25pa
-  if (lowerEmail.endsWith('@vishnu.edu.in') && emailPrefix && (emailPrefix.startsWith('24pa') || emailPrefix.startsWith('25pa'))) {
-    return 'student';
-  }
-
-  return null; // Unknown pattern
+  return null;
 }
 
 router.post('/signup', async (req, res) => {
   const { name, email, password, role: requestedRole, inviteCode, activationCode } = req.body;
-  if (!name || !email) return res.status(400).json({ error: 'Missing fields' });
+  if (!name || !email || !password) return res.status(400).json({ error: 'Missing fields' });
 
-  // Clean and normalize email
   const cleanEmail = email.trim().toLowerCase();
-
-  // Basic email validation
   if (!cleanEmail.endsWith('@vishnu.edu.in')) {
     return res.status(400).json({ error: 'Email must be a @vishnu.edu.in email address' });
   }
 
-  // Detect role from email if not provided
-  let role = requestedRole;
+  let role = requestedRole || detectRoleFromEmail(cleanEmail);
   if (!role) {
-    role = detectRoleFromEmail(cleanEmail);
-    if (!role) {
-      return res.status(400).json({ error: 'Could not determine role from email. Please provide a valid @vishnu.edu.in email.' });
-    }
+    return res.status(400).json({ error: 'Could not determine role from email.' });
   }
 
-  // For non-student roles, require invite code or activation code
+  // Verification for non-student roles
   if (role !== 'student' && !INCHARGE_EMAILS.includes(cleanEmail)) {
-    // If faculty, must have a valid activation code
     if (role === 'faculty') {
-      if (!activationCode) {
-        return res.status(400).json({ error: 'Activation code is required for faculty signup.' });
-      }
-      const codeCheck = await db.query('SELECT * FROM activation_codes WHERE code = $1 AND is_used = false', [activationCode.trim()]);
-      if (codeCheck.rowCount === 0) {
-        return res.status(403).json({ error: 'Invalid or already used activation code.' });
-      }
+      if (!activationCode) return res.status(400).json({ error: 'Activation code required for faculty.' });
+      const codeRecord = await ActivationCode.findOne({ code: activationCode.trim(), is_used: false });
+      if (!codeRecord) return res.status(403).json({ error: 'Invalid or used activation code.' });
+      codeRecord.is_used = true;
+      await codeRecord.save();
     } else {
-      // For Admin/Incharge (if not listed in INCHARGE_EMAILS)
       if (!inviteCode || inviteCode !== process.env.ADMIN_INVITE_CODE) {
-        return res.status(403).json({ error: 'Invite code required for higher privilege accounts.' });
+        return res.status(403).json({ error: 'Invite code required.' });
       }
     }
-  }
-
-  // Validate email patterns - for students, check if it starts with 24pa or 25pa followed by alphanumeric
-  if (role === 'student') {
-    const emailPrefix = cleanEmail.split('@')[0]; // Get part before @
-    const pattern = /^(24pa|25pa)[a-z0-9]+$/i;
-    if (!pattern.test(emailPrefix)) {
-      return res.status(400).json({
-        error: `Student email must start with 24pa or 25pa followed by letters and numbers. Example: 24pa1a0250@vishnu.edu.in`
-      });
-    }
-  }
-
-  if (role === 'faculty' && !FACULTY_EMAIL_RE.test(cleanEmail)) {
-    return res.status(400).json({ error: 'Faculty email must match pattern name.m@vishnu.edu.in' });
   }
 
   try {
-    if (!password) {
-      return res.status(400).json({ error: 'Password is required' });
-    }
-
     const hashed = await bcrypt.hash(password, 10);
-    const insert = 'INSERT INTO users (name,email,password_hash,role) VALUES ($1,$2,$3,$4) RETURNING id,email,role,name';
-    const values = [name.trim(), cleanEmail, hashed, role];
-    const { rows } = await db.query(insert, values);
-    const user = rows[0];
+    const newUser = new User({
+      name: name.trim(),
+      email: cleanEmail,
+      password_hash: hashed,
+      role
+    });
 
-    // Mark activation code as used if faculty
-    if (role === 'faculty' && activationCode) {
-      await db.query('UPDATE activation_codes SET is_used = true WHERE code = $1', [activationCode.trim()]);
-    }
+    await newUser.save();
 
-    const token = jwt.sign({ userId: user.id, role: user.role, name: user.name }, process.env.JWT_SECRET || 'your-secret-key-change-in-production');
-    res.json({ token, user });
+    const token = jwt.sign(
+      {
+        userId: newUser._id,
+        role: newUser.role,
+        name: newUser.name,
+        email: newUser.email,
+        department: newUser.department,
+        class_name: newUser.class_name
+      },
+      process.env.JWT_SECRET || 'secret'
+    );
+    res.json({ token, user: { id: newUser._id, email: newUser.email, role: newUser.role, name: newUser.name, department: newUser.department, class_name: newUser.class_name } });
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'Email already exists' });
-    console.error('Signup error:', err);
-    res.status(500).json({ error: err.message || 'Server error' });
+    if (err.code === 11000) return res.status(409).json({ error: 'Email already exists' });
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -127,39 +89,52 @@ router.post('/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Missing fields' });
   try {
-    const { rows } = await db.query('SELECT id,name,email,password_hash,role,is_active,must_change_password FROM users WHERE email=$1', [email.toLowerCase().trim()]);
-    if (!rows[0]) return res.status(401).json({ error: 'Invalid email or password' });
-    const user = rows[0];
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
 
-    if (user.is_active === false) {
-      return res.status(403).json({ error: 'Your account has been deactivated. Please contact the administrator.' });
-    }
+    if (!user.is_active) return res.status(403).json({ error: 'Account deactivated.' });
 
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: 'Invalid email or password' });
 
-    const token = jwt.sign({ userId: user.id, role: user.role, name: user.name }, process.env.JWT_SECRET || 'your-secret-key-change-in-production');
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role, must_change_password: user.must_change_password } });
+    const token = jwt.sign(
+      {
+        userId: user._id,
+        role: user.role,
+        name: user.name,
+        email: user.email,
+        department: user.department,
+        class_name: user.class_name
+      },
+      process.env.JWT_SECRET || 'secret'
+    );
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        department: user.department,
+        class_name: user.class_name,
+        must_change_password: user.must_change_password
+      }
+    });
   } catch (err) {
-    console.error('Login error:', err);
-    // Return the error message to help debugging in development/deployment.
-    // NOTE: Exposing detailed errors to clients is a security risk in production;
-    // revert this change once the underlying issue is fixed.
-    res.status(500).json({ error: err.message || 'Server error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Get current user info
 router.get('/me', async (req, res) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Missing token' });
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-in-production');
-    const { rows } = await db.query('SELECT id,name,email,role,uid FROM users WHERE id=$1', [payload.userId]);
-    if (!rows[0]) return res.status(404).json({ error: 'User not found' });
-    res.json({ user: rows[0] });
+    const payload = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+    const user = await User.findById(payload.userId).select('name email role uid');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({ user });
   } catch (err) {
     return res.status(403).json({ error: 'Invalid token' });
   }

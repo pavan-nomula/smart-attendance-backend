@@ -1,110 +1,206 @@
 const express = require('express');
-const db = require('../db');
+const Attendance = require('../models/Attendance');
+const User = require('../models/User');
 const { authenticateToken } = require('../middleware/auth');
+const fs = require('fs');
+const csv = require('csv-parser');
+const path = require('path');
+
 const router = express.Router();
 
-// POST /api/attendance/mark
-// body: { uid }  OR { studentId, period_id }
-router.post('/mark', async (req, res) => {
-  const { uid, studentId, period_id, timestamp } = req.body;
+router.get('/', authenticateToken, async (req, res) => {
   try {
-    let student;
-    if (uid) {
-      const { rows } = await db.query('SELECT id FROM users WHERE uid=$1', [uid]);
-      student = rows[0];
-      if (!student) return res.status(404).json({ error: 'UID not mapped to any student' });
-    } else if (studentId) {
-      const { rows } = await db.query('SELECT id FROM users WHERE id=$1', [studentId]);
-      student = rows[0];
-      if (!student) return res.status(404).json({ error: 'Student not found' });
-    } else {
-      return res.status(400).json({ error: 'uid or studentId required' });
+    let filter = {};
+    if (req.user.role === 'student') {
+      filter.student_id = req.user.userId;
     }
-
-    const date = timestamp ? new Date(timestamp).toISOString().slice(0,10) : new Date().toISOString().slice(0,10);
-    const markedAt = timestamp ? new Date(timestamp) : new Date();
-
-    const upsert = `INSERT INTO attendance (student_id,date,period_id,status,marked_at,source)
-      VALUES ($1,$2,$3,'P',$4,$5)
-      ON CONFLICT (student_id,date,period_id) DO UPDATE SET status='P', marked_at=EXCLUDED.marked_at, source=EXCLUDED.source
-      RETURNING *`;
-
-    const source = uid ? 'pi' : 'web';
-    const values = [student.id, date, period_id || null, markedAt, source];
-    const { rows } = await db.query(upsert, values);
-    res.json({ ok: true, attendance: rows[0] });
+    const logs = await Attendance.find(filter).populate('student_id', 'name email').sort({ marked_at: -1 });
+    res.json({ rows: logs });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// GET /api/attendance/today?period_id=...
 router.get('/today', authenticateToken, async (req, res) => {
-  const { period_id } = req.query;
   try {
-    const date = new Date().toISOString().slice(0,10);
-    const currentDay = new Date().getDay(); // 0 = Sunday, 6 = Saturday
-    
-    // If period_id is provided, use it; otherwise try to find current period from timetable
-    let targetPeriodId = period_id ? parseInt(period_id, 10) : null;
-    
-    if (!targetPeriodId) {
-      const now = new Date();
-      const currentTime = now.toTimeString().slice(0, 5); // HH:MM format
-      
-      // Find current period based on time
-      const periodQuery = `SELECT period_id FROM timetable 
-        WHERE day_of_week = $1 
-        AND start_time <= $2 
-        AND end_time >= $2 
-        LIMIT 1`;
-      const periodResult = await db.query(periodQuery, [currentDay, currentTime]);
-      if (periodResult.rows.length > 0) {
-        targetPeriodId = periodResult.rows[0].period_id;
-      }
-    }
-    
-    const q = `SELECT u.id as student_id, u.name, u.email, a.status, a.marked_at, a.source, a.period_id
-      FROM users u
-      LEFT JOIN attendance a ON a.student_id = u.id AND a.date = $1 AND (a.period_id = $2 OR ($2 IS NULL AND a.period_id IS NULL))
-      WHERE u.role = 'student'
-      ORDER BY u.name`;
-    const { rows } = await db.query(q, [date, targetPeriodId]);
-    res.json({ date, period_id: targetPeriodId, rows });
+    const today = new Date().toISOString().split('T')[0];
+    const { period_id } = req.query;
+    let filter = { date: today };
+    if (period_id) filter.period_id = period_id;
+
+    const logs = await Attendance.find(filter).populate('student_id', 'name email uid');
+    const rows = logs.map(log => ({
+      student_id: log.student_id?.uid || log.student_id?._id,
+      name: log.student_id?.name || 'Unknown',
+      email: log.student_id?.email || 'N/A',
+      status: log.status,
+      marked_at: log.marked_at,
+      source: log.source
+    }));
+    res.json({ rows });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Mark attendance manually (faculty/incharge only)
 router.post('/manual', authenticateToken, async (req, res) => {
-  if (!['faculty','incharge','admin'].includes(req.user.role)) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-  
-  const { studentId, period_id, status, date } = req.body;
-  
-  if (!studentId || !status || !['P','A'].includes(status)) {
-    return res.status(400).json({ error: 'Invalid parameters' });
-  }
-  
+  const { student_id, period_id, status } = req.body;
   try {
-    const attendanceDate = date || new Date().toISOString().slice(0,10);
-    const markedAt = new Date();
-    
-    const upsert = `INSERT INTO attendance (student_id,date,period_id,status,marked_at,source)
-      VALUES ($1,$2,$3,$4,$5,'web')
-      ON CONFLICT (student_id,date,period_id) DO UPDATE SET status=$4, marked_at=$5, source='web'
-      RETURNING *`;
-    
-    const { rows } = await db.query(upsert, [studentId, attendanceDate, period_id || null, status, markedAt]);
-    res.json({ ok: true, attendance: rows[0] });
+    const today = new Date().toISOString().split('T')[0];
+    const update = {
+      status,
+      marked_at: new Date(),
+      source: 'web'
+    };
+
+    const log = await Attendance.findOneAndUpdate(
+      { student_id, date: today, period_id: period_id || 1 },
+      update,
+      { upsert: true, new: true }
+    );
+
+    res.json({ ok: true, data: log });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------------------------------------------------------------
+// RASPBERRY PI HARDWARE INTEGRATION SECTION
+// -------------------------------------------------------------------------
+
+/**
+ * @route   POST /api/attendance
+ * @desc    Receives real-time attendance data from Raspberry Pi Python scripts.
+ * @logic   1. Attempts to sync data with MongoDB Atlas for the central dashboard.
+ *          2. Appends a raw record to the local CSV file as requested for logging.
+ */
+router.post('/', async (req, res) => {
+  const { uid, name, status, time, student_id, date, period_id, source } = req.body;
+  const CSV_FILE = process.env.CSV_PATH || path.join(__dirname, '../attendance.csv');
+
+  // 1. Save to MongoDB (Keep existing functionality)
+  try {
+    let finalStudentId = student_id;
+    if (uid && !finalStudentId) {
+      const user = await User.findOne({ uid });
+      if (user) finalStudentId = user._id;
+    }
+
+    if (finalStudentId) {
+      const newLog = new Attendance({
+        student_id: finalStudentId,
+        date: date || new Date().toISOString().split('T')[0],
+        period_id: period_id || 1,
+        status: status === 'IN' ? 'P' : (status || 'P'),
+        source: source || 'hardware'
+      });
+      await newLog.save().catch(e => console.log("MDB Save Skip (Duplicate/Error):", e.message));
+    }
+  } catch (err) {
+    console.log("MongoDB sync error:", err.message);
+  }
+
+  // 2. Append to CSV (User's specific request: RegNo, Name, Status, Timestamp)
+  const regNo = uid || 'N/A';
+  const timestamp = time || new Date().toLocaleString();
+  const line = `${regNo},${name || 'Unknown'},${status || 'P'},${timestamp}\n`;
+
+  fs.appendFile(CSV_FILE, line, (err) => {
+    if (err) {
+      console.log(err);
+      return res.status(500).send("Write error");
+    }
+    console.log("Saved to CSV:", line.trim());
+    res.send("OK");
+  });
+});
+
+/**
+ * @route   GET /api/attendance/csv
+ * @desc    Fetches the history of attendance logs from the CSV file.
+ * @return  JSON array of attendance records in reverse order (Latest First).
+ */
+router.get('/csv', (req, res) => {
+  const CSV_FILE = path.join(__dirname, '../attendance.csv');
+  console.log(`[${new Date().toLocaleTimeString()}] GET /api/attendance/csv requested...`);
+
+  try {
+    if (!fs.existsSync(CSV_FILE)) {
+      console.log("Monitor: attendance.csv not found at", CSV_FILE);
+      return res.json([]);
+    }
+
+    const content = fs.readFileSync(CSV_FILE, "utf8");
+    const lines = content.trim().split(/\r?\n/);
+    console.log(`Monitor: Found ${lines.length} lines in CSV`);
+
+    // Skip header line "RegNo,Name,Status,Timestamp"
+    const dataLines = lines.length > 1 ? lines.slice(1) : [];
+
+    const formattedData = dataLines.map((l, index) => {
+      const [regNo, name, status, time] = l.split(",");
+      return {
+        regNo: regNo || 'N/A',
+        name: name || 'Unknown',
+        status: status || 'N/A',
+        time: time || 'N/A'
+      };
+    });
+
+    console.log(`Monitor: Returning ${formattedData.length} records`);
+    res.json(formattedData.reverse());
+  } catch (err) {
+    console.error("Monitor Error:", err.message);
+    res.status(500).json({ error: "Failed to read logs" });
+  }
+});
+
+/**
+ * @route   GET /api/attendance/live
+ * @desc    Aggregates entry and exit times from the CSV for real-time monitoring.
+ */
+router.get('/live', (req, res) => {
+  const CSV_FILE = path.join(__dirname, '../attendance.csv');
+  try {
+    if (!fs.existsSync(CSV_FILE)) return res.json([]);
+
+    const content = fs.readFileSync(CSV_FILE, "utf8");
+    const lines = content.trim().split(/\r?\n/);
+    const dataLines = lines.length > 1 ? lines.slice(1) : [];
+
+    const stats = {};
+
+    dataLines.forEach(l => {
+      const [regNo, name, status, time] = l.split(",");
+      if (!regNo || regNo === 'N/A' || !time) return;
+
+      if (!stats[regNo]) {
+        // Initialize with first scan
+        stats[regNo] = {
+          regNo,
+          name: name || 'Unknown',
+          entryTime: time,  // First scan time
+          exitTime: null,   // Will be updated with subsequent scans
+          lastStatus: status
+        };
+      } else {
+        // Always update exit time with the latest scan
+        stats[regNo].exitTime = time;
+        stats[regNo].lastStatus = status;
+
+        // Keep the earliest entry time if status is IN
+        if (status === 'IN' && !stats[regNo].entryTime) {
+          stats[regNo].entryTime = time;
+        }
+      }
+    });
+
+    res.json(Object.values(stats));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
 module.exports = router;
+
