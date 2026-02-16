@@ -89,7 +89,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = 4001;
+const PORT = process.env.PORT || 4001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Backend server is running on port ${PORT}`);
   console.log(`🏠 Local URL: http://localhost:${PORT}/api`);

@@ -94,7 +94,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Internal Server Error', message: err.message });
 });
 
-const PORT = 4001;
+const PORT = process.env.PORT || 4001;
 const HOST = '0.0.0.0'; // Essential for external Raspberry Pi access
 
 app.use('/api/attendance', attendanceRoutes);
