@@ -97,6 +97,8 @@ app.use((err, req, res, next) => {
 const PORT = 4001;
 const HOST = '0.0.0.0'; // Essential for external Raspberry Pi access
 
+app.use('/api/attendance', attendanceRoutes);
+
 app.listen(PORT, HOST, () => {
     console.log('==============================================');
     console.log(`🚀 Server running at http://localhost:${PORT}`);

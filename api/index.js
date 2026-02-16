@@ -23,14 +23,14 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
-const authRoutes = require('./routes/auth');
-const attendanceRoutes = require('./routes/attendance');
-const permissionsRoutes = require('./routes/permissions');
-const usersRoutes = require('./routes/users');
-const timetableRoutes = require('./routes/timetable');
-const reportsRoutes = require('./routes/reports');
-const complaintsRoutes = require('./routes/complaints');
-const hardwareRoutes = require('./routes/hardware');
+const authRoutes = require('../routes/auth');
+const attendanceRoutes = require('../routes/attendance');
+const permissionsRoutes = require('../routes/permissions');
+const usersRoutes = require('../routes/users');
+const timetableRoutes = require('../routes/timetable');
+const reportsRoutes = require('../routes/reports');
+const complaintsRoutes = require('../routes/complaints');
+const hardwareRoutes = require('../routes/hardware');
 
 const app = express();
 app.use(cors());

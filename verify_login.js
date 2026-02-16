@@ -64,7 +64,9 @@ const get = (url, token) => {
 const testLogin = async () => {
     try {
         console.log('Testing Admin Login...');
-        const loginRes = await post('http://localhost:4000/api/auth/login', {
+        // const loginRes = await post('http://localhost:4001/api/auth/login', {
+        const loginRes = await post('https://smart-attendance-backend-beta.vercel.app/api/auth/login', {
+
             email: 'admin@vishnu.edu.in',
             password: 'Admin@123'
         });
@@ -74,7 +76,9 @@ const testLogin = async () => {
 
         const token = loginRes.token;
         console.log('\nTesting Auth Me...');
-        const meRes = await get('http://localhost:4000/api/auth/me', token);
+        // const meRes = await get('http://localhost:4001/api/auth/me', token);
+        const meRes = await get('https://smart-attendance-backend-beta.vercel.app/api/auth/me', token);
+
 
         console.log('Auth Me Successful!');
         console.log('User ID from DB:', meRes._id);
